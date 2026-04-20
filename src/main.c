@@ -1,10 +1,12 @@
 #include <genesis.h>
 #include "resources.h"
 #include "songs/song.h"
-#include "songs/smoke_on_the_water.h"
+#include "songs/song_registry.h"
+//#include "songs/smoke_on_the_water.h"
+
 
 /*
- * Guitar Lero
+ * Guitar Hero
  * Minimal SGDK rhythm prototype
  *
  * Current goals:
@@ -54,6 +56,15 @@ typedef enum
     DIFFICULTY_COUNT
 } Difficulty;
 
+typedef enum
+{
+    GAME_STATE_MENU = 0,
+    GAME_STATE_PLAYING
+} GameState;
+
+static GameState gameState = GAME_STATE_MENU;
+static u16 selectedSongIndex = 0;
+
 /*
  * Future hook for difficulty selection:
  * speed values are in pixels * 10 per frame.
@@ -97,13 +108,15 @@ static const SpriteDefinition* hitZoneDefinitions[LANE_COUNT] = { &hitZoneRed, &
 static Sprite* noteSprites[MAX_NOTES];
 static Sprite* hitZoneSprites[LANE_COUNT];
 
-static const SongChart* activeSong = &songSmokeOnTheWater;
+static const SongChart* activeSong = NULL;
 static u32 framesPerStepFP = 0;
 static u32 travelFramesFP = 0;
 static u32 songFrameFP = 0;
 static u16 schedulerLeadSteps = 0;
 static u16 nextEventIndex = 0;
 static u16 loopCount = 0;
+
+
 
 static void setupLaneColors(void)
 {
@@ -615,6 +628,117 @@ static void renderDynamic(void)
     setDefaultTextColor();
 }
 
+static void drawMainMenu(void)
+{
+    u16 i;
+    u16 y = 10;
+
+    VDP_clearPlane(BG_A, TRUE);
+    VDP_clearTextArea(0, 0, 40, 28);
+
+    VDP_drawText("GUITAR HERO", 14, 4);
+    VDP_drawText("SELECT SONG", 14, 6);
+
+    for (i = 0; i < songCount; i++)
+    {
+        if (i == selectedSongIndex)
+        {
+            VDP_drawText(">", 8, y);
+        }
+        else
+        {
+            VDP_drawText(" ", 8, y);
+        }
+
+        VDP_drawText(songList[i]->title, 10, y);
+        y += 2;
+    }
+
+    VDP_drawText("UP/DOWN = SELECT", 9, 22);
+    VDP_drawText("START/A = PLAY", 10, 24);
+}
+
+static void startGameWithSong(const SongChart* song)
+{
+    u16 i;
+
+    activeSong = song;
+    score = 0;
+    misses = 0;
+    scrollAccumulator = 0;
+    uiSfxFramesLeft = 0;
+    guitarSfxFramesLeft = 0;
+    guitarSfxTotalFrames = 0;
+
+    for (i = 0; i < MAX_NOTES; i++)
+    {
+        notes[i].active = FALSE;
+        notes[i].hit = FALSE;
+    }
+
+    for (i = 0; i < LANE_COUNT; i++)
+    {
+        laneFeedbackTimer[i] = 0;
+        laneFeedbackHit[i] = FALSE;
+    }
+
+    PSG_reset();
+    PSG_setEnvelope(0, PSG_ENVELOPE_MIN);
+    PSG_setEnvelope(1, PSG_ENVELOPE_MIN);
+    PSG_setEnvelope(2, PSG_ENVELOPE_MIN);
+    PSG_setEnvelope(3, PSG_ENVELOPE_MIN);
+
+    VDP_clearPlane(BG_A, TRUE);
+    VDP_clearTextArea(0, 0, 40, SCREEN_ROWS);
+
+    drawStaticScene();
+    setupLaneColors();
+    resetSongScheduler();
+    updateNoteSprites();
+    renderDynamic();
+    SPR_update();
+    SYS_doVBlankProcess();
+
+    gameState = GAME_STATE_PLAYING;
+}
+
+static void updateMainMenu(u16 value, u16 changed)
+{
+    if ((changed & BUTTON_UP) && (value & BUTTON_UP))
+    {
+        if (selectedSongIndex > 0)
+        {
+            selectedSongIndex--;
+        }
+        drawMainMenu();
+    }
+
+    if ((changed & BUTTON_DOWN) && (value & BUTTON_DOWN))
+    {
+        if (selectedSongIndex + 1 < songCount)
+        {
+            selectedSongIndex++;
+        }
+        drawMainMenu();
+    }
+
+    if ((changed & BUTTON_START) && (value & BUTTON_START))
+    {
+        startGameWithSong(songList[selectedSongIndex]);
+    }
+
+    if ((changed & BUTTON_A) && (value & BUTTON_A))
+    {
+        startGameWithSong(songList[selectedSongIndex]);
+    }
+}
+
+static void returnToMenu(void)
+{
+    gameState = GAME_STATE_MENU;
+    drawMainMenu();
+}
+
 int main(bool hard)
 {
     u16 value;
@@ -628,50 +752,54 @@ int main(bool hard)
     PSG_setEnvelope(1, PSG_ENVELOPE_MIN);
     PSG_setEnvelope(2, PSG_ENVELOPE_MIN);
     PSG_setEnvelope(3, PSG_ENVELOPE_MIN);
+
     setDefaultTextColor();
     VDP_setScreenWidth320();
     VDP_clearPlane(BG_A, TRUE);
+    VDP_clearPlane(BG_B, TRUE);
     VDP_clearTextArea(0, 0, 40, SCREEN_ROWS);
+
     initSprites();
-    drawStaticScene();
-    setupLaneColors();
+
     for (i = 0; i < LANE_COUNT; i++)
     {
         laneFeedbackTimer[i] = 0;
         laneFeedbackHit[i] = FALSE;
     }
 
-    /* Initialize BPM-based scheduler for the active song chart. */
-    resetSongScheduler();
-    updateNoteSprites();
-    renderDynamic();
-    SPR_update();
-    SYS_doVBlankProcess();
+    drawMainMenu();
 
     while (TRUE)
     {
-        /* 1. Read input */
         JOY_update();
         value = JOY_readJoypad(JOY_1);
         changed = value & ~previousValue;
-        handleInput(value, changed);
         previousValue = value;
 
-        /* 2. Update note positions */
-        updateNotes();
-        updateSongClock();
-        updateSpawner();
-        updateSfx();
-        updateLaneFeedback();
+        if (gameState == GAME_STATE_MENU)
+        {
+            updateMainMenu(value, changed);
+        }
+        else if (gameState == GAME_STATE_PLAYING)
+        {
+            if ((changed & BUTTON_X) && (value & BUTTON_X))
+            {
+                returnToMenu();
+                SYS_doVBlankProcess();
+                continue;
+            }
 
-        /* 3. Hit / miss logic is handled in handleInput() and updateNotes() */
-        updateNoteSprites();
+            handleInput(value, changed);
+            updateNotes();
+            updateSongClock();
+            updateSpawner();
+            updateSfx();
+            updateLaneFeedback();
+            updateNoteSprites();
+            renderDynamic();
+            SPR_update();
+        }
 
-        /* 4. Render dynamic elements */
-        renderDynamic();
-        SPR_update();
-
-        /* 5. Wait for VBlank */
         SYS_doVBlankProcess();
     }
 
