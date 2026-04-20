@@ -1,0 +1,3 @@
+GDK = D:/Repo/sgdk
+
+include $(GDK)/makefile.gen
