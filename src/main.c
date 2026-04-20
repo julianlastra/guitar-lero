@@ -26,7 +26,7 @@
 #define SPEED_DEN          10
 #define MISS_SFX_FREQ      220
 #define MISS_SFX_FRAMES    7
-#define GUITAR_SFX_FRAMES  10
+#define GUITAR_MIN_FRAMES   4
 #define LANE_FEEDBACK_FRAMES 7
 #define FIXED_FPS          60
 #define TIME_FP_SHIFT      12
@@ -68,6 +68,9 @@ typedef struct
     s16 x;
     s16 y;
     u16 lane;
+    u16 durationSteps;
+    u16 rootHz;
+    u16 fifthHz;
     bool active;
     bool hit;
 } Note;
@@ -79,6 +82,9 @@ static s16 misses = 0;
 static u16 scrollAccumulator = 0;
 static s16 uiSfxFramesLeft = 0;
 static s16 guitarSfxFramesLeft = 0;
+static s16 guitarSfxTotalFrames = 0;
+static u16 guitarRootCurrentHz = 0;
+static u16 guitarFifthCurrentHz = 0;
 static s16 laneFeedbackTimer[LANE_COUNT];
 static bool laneFeedbackHit[LANE_COUNT];
 
@@ -165,12 +171,29 @@ static void setMissFeedbackColor(void)
  * PSG guitar-ish power chord frequencies (approx):
  * root on channel 1 + fifth on channel 2.
  */
-static const u16 laneGuitarRootHz[LANE_COUNT] = { 147, 175, 196 };
-static const u16 laneGuitarFifthHz[LANE_COUNT] = { 220, 262, 294 };
+// This limits notes to these frequencies, but it's a simple way to get a more musical sound without needing custom samples or complex synthesis.
+//static const u16 laneGuitarRootHz[LANE_COUNT] = { 147, 175, 196 };
+//static const u16 laneGuitarFifthHz[LANE_COUNT] = { 220, 262, 294 };
 
 static u16 getHitWindow(void)
 {
     return hitWindowByDifficulty[currentDifficulty];
+}
+
+static u16 stepsToFrames(u16 durationSteps)
+{
+    u32 durationFramesFP;
+    u16 frames;
+
+    durationFramesFP = (u32)durationSteps * framesPerStepFP;
+    frames = (u16)((durationFramesFP + (TIME_FP_ONE - 1)) >> TIME_FP_SHIFT);
+
+    if (frames < GUITAR_MIN_FRAMES)
+    {
+        frames = GUITAR_MIN_FRAMES;
+    }
+
+    return frames;
 }
 
 static void playUiSfx(u16 frequency, u8 envelope, s16 durationFrames)
@@ -180,14 +203,21 @@ static void playUiSfx(u16 frequency, u8 envelope, s16 durationFrames)
     uiSfxFramesLeft = durationFrames;
 }
 
-static void playGuitarNote(u16 lane)
+static void playGuitarNote(u16 rootHz, u16 fifthHz, u16 durationSteps)
 {
-    /* Rock-ish hit: root + fifth with short decay. */
-    PSG_setFrequency(1, laneGuitarRootHz[lane]);
-    PSG_setFrequency(2, laneGuitarFifthHz[lane]);
-    PSG_setEnvelope(1, 2);
-    PSG_setEnvelope(2, 4);
-    guitarSfxFramesLeft = GUITAR_SFX_FRAMES;
+    u16 durationFrames = stepsToFrames(durationSteps);
+
+    guitarRootCurrentHz = rootHz;
+    guitarFifthCurrentHz = fifthHz;
+
+    PSG_setFrequency(1, guitarRootCurrentHz);
+    PSG_setFrequency(2, guitarFifthCurrentHz);
+
+    PSG_setEnvelope(1, 1);
+    PSG_setEnvelope(2, 3);
+
+    guitarSfxFramesLeft = durationFrames;
+    guitarSfxTotalFrames = durationFrames;
 }
 
 static void triggerLaneFeedback(u16 lane, bool hit)
@@ -222,21 +252,52 @@ static void updateSfx(void)
 
     if (guitarSfxFramesLeft > 0)
     {
-        u8 rootEnv = 2 + (GUITAR_SFX_FRAMES - guitarSfxFramesLeft);
-        u8 fifthEnv = 4 + (GUITAR_SFX_FRAMES - guitarSfxFramesLeft);
+        s16 elapsed = guitarSfxTotalFrames - guitarSfxFramesLeft;
+        s16 thirdPoint = guitarSfxTotalFrames / 3;
+        s16 twoThirdsPoint = (guitarSfxTotalFrames * 2) / 3;
+        u8 rootEnv;
+        u8 fifthEnv;
 
-        if (rootEnv > PSG_ENVELOPE_MIN)
+        if (elapsed < 2)
         {
-            rootEnv = PSG_ENVELOPE_MIN;
+            rootEnv = 1;
+            fifthEnv = 2;
         }
-        if (fifthEnv > PSG_ENVELOPE_MIN)
+        else if (elapsed < thirdPoint)
         {
-            fifthEnv = PSG_ENVELOPE_MIN;
+            rootEnv = 3;
+            fifthEnv = 5;
         }
+        else if (elapsed < twoThirdsPoint)
+        {
+            rootEnv = 6;
+            fifthEnv = 8;
+        }
+        else
+        {
+            rootEnv = 10;
+            fifthEnv = 12;
+        }
+
+        if (rootEnv > PSG_ENVELOPE_MIN) rootEnv = PSG_ENVELOPE_MIN;
+        if (fifthEnv > PSG_ENVELOPE_MIN) fifthEnv = PSG_ENVELOPE_MIN;
 
         PSG_setEnvelope(1, rootEnv);
         PSG_setEnvelope(2, fifthEnv);
+
+        if ((elapsed & 1) == 0)
+        {
+            PSG_setFrequency(1, guitarRootCurrentHz + 1);
+            PSG_setFrequency(2, guitarFifthCurrentHz);
+        }
+        else
+        {
+            PSG_setFrequency(1, guitarRootCurrentHz);
+            PSG_setFrequency(2, guitarFifthCurrentHz);
+        }
+
         guitarSfxFramesLeft--;
+
         if (guitarSfxFramesLeft == 0)
         {
             PSG_setEnvelope(1, PSG_ENVELOPE_MIN);
@@ -285,7 +346,7 @@ static void resetSongScheduler(void)
  * Spawn one note in the requested lane.
  * Returns TRUE if a free note slot was found.
  */
-static bool spawnNote(u16 lane)
+static bool spawnNote(u16 lane, u16 durationSteps, u16 rootHz, u16 fifthHz)
 {
     u16 i;
 
@@ -294,6 +355,9 @@ static bool spawnNote(u16 lane)
         if (!notes[i].active)
         {
             notes[i].lane = lane;
+            notes[i].durationSteps = durationSteps;
+            notes[i].rootHz = rootHz;
+            notes[i].fifthHz = fifthHz;
             notes[i].x = noteLinesX[lane];
             notes[i].y = NOTE_START_Y;
             notes[i].active = TRUE;
@@ -320,7 +384,7 @@ static void updateSpawner(void)
             break;
         }
 
-        if (!spawnNote(event->lane))
+            if (!spawnNote(event->lane, event->durationSteps, event->rootHz, event->fifthHz))
         {
             break;
         }
@@ -398,7 +462,7 @@ static void tryHitLane(u16 lane)
             notes[i].hit = TRUE;
             score++;
             triggerLaneFeedback(lane, TRUE);
-            playGuitarNote(lane);
+            playGuitarNote(notes[i].rootHz, notes[i].fifthHz, notes[i].durationSteps);
             return;
         }
     }

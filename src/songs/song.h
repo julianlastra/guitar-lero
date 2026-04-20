@@ -7,6 +7,9 @@ typedef struct
 {
     u16 lane;
     u16 step;
+    u16 durationSteps;
+    u16 rootHz;
+    u16 fifthHz;
 } ChartEvent;
 
 typedef struct
